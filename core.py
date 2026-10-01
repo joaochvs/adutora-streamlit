@@ -72,6 +72,21 @@ def ler_excel(content):
     return df.dropna(how="all"), sheet
 
 
+def ultima_visita(value):
+    turno = periodo(value)
+    if isinstance(value, (datetime, time, pd.Timestamp)):
+        horario = value.strftime("%H:%M")
+    elif isinstance(value, (int, float)) and 0 <= value < 1:
+        minutos = round(float(value) * 24 * 60)
+        horario = f"{minutos // 60 % 24:02d}:{minutos % 60:02d}"
+    else:
+        match = re.fullmatch(r"(\d{1,2})[:hH](\d{2})(?::\d{2})?", texto(value))
+        horario = f"{int(match[1]):02d}:{match[2]}" if match and turno else ""
+    if horario and turno:
+        return f"{horario} - {turno}"
+    return turno or texto(value) or "Não informado"
+
+
 def preparar(df):
     df = df.copy()
     df.columns = [nome_coluna(c) for c in df.columns]
@@ -96,7 +111,7 @@ def preparar(df):
         numero_visita = int(tentativa[1]) + 1 if tentativa else None
         realizar = f"Realizar {numero_visita}ª visita" if numero_visita else "Realizar próxima visita"
         acao = f"{realizar} no período da {proximo.lower()}." if proximo else f"{realizar}; confirmar o período da última visita."
-        rows.append({"Endereço": endereco, "Última visita": anterior or (texto(ultimo) if ultimo is not None else "Não informado"), "Próxima visita": proximo or "Confirmar", "Recomendação": acao})
+        rows.append({"Endereço": endereco, "Última visita": ultima_visita(ultimo), "Próxima visita": proximo or "Confirmar", "Recomendação": acao})
     result = pd.DataFrame(rows, columns=["Endereço", "Última visita", "Próxima visita", "Recomendação"])
     if "TRECHO" in df.columns:
         ausentes = df[df["STATUS"].map(status_ausente)]
