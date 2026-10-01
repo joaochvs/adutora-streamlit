@@ -52,6 +52,7 @@ class RevisitasTest(unittest.TestCase):
         df.loc[0,"Turno2"] = "14:30"
         df["Dia3"] = "data inválida"
         self.assertEqual(preparar(df).iloc[0]["Próxima visita"], "Manhã")
+        self.assertEqual(preparar(df).iloc[0]["Última visita"], "14:30 - Tarde")
 
     def test_excel_e_cabecalho(self):
         from openpyxl import Workbook
