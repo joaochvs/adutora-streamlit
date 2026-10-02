@@ -1,5 +1,5 @@
-"""Relatório de revisitas baseado no último turno preenchido."""
-from datetime import datetime, time
+"""Relatório de revisitas com histórico, próximo dia e restrições por trecho."""
+from datetime import datetime, time, date, timedelta
 from io import BytesIO
 import re
 import unicodedata
@@ -87,6 +87,45 @@ def ultima_visita(value):
     return turno or texto(value) or "Não informado"
 
 
+DIAS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+
+
+def dia_visita(value):
+    """Aceita datas do Excel, datas brasileiras e nomes dos dias sem inventar datas."""
+    if not turno_preenchido(value):
+        return None, None
+    if isinstance(value, (datetime, date, pd.Timestamp)):
+        d = value.date() if isinstance(value, datetime) else value
+        return d, d.weekday()
+    n = normalizar(value).replace("-FEIRA", "")
+    for i, nome in enumerate(DIAS):
+        if n == normalizar(nome).replace("-FEIRA", ""):
+            return None, i
+    if isinstance(value, (int, float)) and 1 <= value <= 100000:
+        d = date(1899, 12, 30) + timedelta(days=int(value))
+        return d, d.weekday()
+    try:
+        d = pd.to_datetime(texto(value), dayfirst=True, errors="raise").date()
+        return d, d.weekday()
+    except (ValueError, TypeError, OverflowError):
+        return None, None
+
+
+def proximo_dia(value):
+    d, indice = dia_visita(value)
+    if indice is None:
+        return "confirmar dia"
+    salto = 2 if indice == 5 else 1
+    seguinte = (indice + salto) % 7
+    return (f"{(d + timedelta(days=salto)):%d/%m/%Y} ({DIAS[seguinte]})"
+            if d else DIAS[seguinte])
+
+
+def numero_trecho(value):
+    match = re.fullmatch(r"(?:TRECHO\s*)?(\d+)(?:\.0)?", normalizar(value))
+    return int(match[1]) if match else None
+
+
 def preparar(df):
     df = df.copy()
     df.columns = [nome_coluna(c) for c in df.columns]
@@ -103,16 +142,45 @@ def preparar(df):
             continue
         numero = next((texto(row[c]) for c in ["N", "NO", "NUMERO"] if c in df.columns and texto(row[c])), "")
         endereco = ", ".join(filter(None, [texto(row["LOGRADOURO"]), numero, texto(row.get("COMPLEMENTO")), texto(row.get("MUNICIPIO"))])) or "Endereço não informado"
-        # A ordem das colunas representa a sequência das tentativas, sem usar os dias.
-        ultimo = next((row[c] for c in reversed(turnos) if turno_preenchido(row[c])), None)
+        visitas = []
+        for i, (col_turno, col_dia) in enumerate(zip(
+                ["TURNO", "TURNO2", "TURNO4", "TURNO6"],
+                ["DIA", "DIA3", "DIA5", "DIA7"]), 1):
+            valor, dia = row.get(col_turno), row.get(col_dia)
+            if turno_preenchido(valor) or turno_preenchido(dia):
+                visitas.append((i, valor, dia))
+        ultimo = visitas[-1][1] if visitas else None
+        ultimo_dia = visitas[-1][2] if visitas else None
+        if not turno_preenchido(ultimo_dia) and isinstance(ultimo, datetime):
+            ultimo_dia = ultimo
         anterior = periodo(ultimo)
         proximo = {"Manhã": "Tarde", "Tarde": "Manhã"}.get(anterior)
         tentativa = re.fullmatch(r"AUSENTE\s*(\d+)", normalizar(row["STATUS"]))
-        numero_visita = int(tentativa[1]) + 1 if tentativa else None
-        realizar = f"Realizar {numero_visita}ª visita" if numero_visita else "Realizar próxima visita"
-        acao = f"{realizar} no período da {proximo.lower()}." if proximo else f"{realizar}; confirmar o período da última visita."
-        rows.append({"Endereço": endereco, "Última visita": ultima_visita(ultimo), "Próxima visita": proximo or "Confirmar", "Recomendação": acao})
-    result = pd.DataFrame(rows, columns=["Endereço", "Última visita", "Próxima visita", "Recomendação"])
+        numero_visita = int(tentativa[1]) + 1 if tentativa else (visitas[-1][0] + 1 if visitas else None)
+        trecho = numero_trecho(row.get("TRECHO"))
+        if trecho in range(15, 20) and anterior == "Noite":
+            proximo = "Manhã"
+        _, indice_dia = dia_visita(ultimo_dia)
+        if indice_dia == 4 and proximo:
+            proximo = "Manhã ou Tarde"
+        sugestao = "Folder (sugestão)" if numero_visita == 3 else (proximo or "Confirmar período")
+        if numero_visita == 3:
+            proximo = "Folder"
+        elif trecho in range(8, 12) and proximo:
+            sugestao += {"Manhã": " (08:00 - 11:59)", "Tarde": " (12:00 - 15:00)",
+                         "Manhã ou Tarde": " (08:00 - 11:59 ou 12:00 - 15:00)"}[proximo]
+        acao = f"{str(numero_visita) + 'ª' if numero_visita else 'Próxima'} visita = {sugestao}; {proximo_dia(ultimo_dia)}"
+        historico = []
+        for i, valor, dia in visitas:
+            if not turno_preenchido(dia) and isinstance(valor, datetime):
+                dia = valor
+            d, indice = dia_visita(dia)
+            dia_texto = f"{d:%d/%m/%Y} ({DIAS[indice]})" if d else DIAS[indice] if indice is not None else "dia não informado"
+            historico.append(f"V{i}: {ultima_visita(valor)} - {dia_texto}")
+        rows.append({"Endereço": endereco, "Última visita": ultima_visita(ultimo),
+                     "Histórico": "\n".join(historico) or "Não informado",
+                     "Próxima visita": proximo or "Confirmar", "Recomendação": acao})
+    result = pd.DataFrame(rows, columns=["Endereço", "Última visita", "Histórico", "Próxima visita", "Recomendação"])
     if "TRECHO" in df.columns:
         ausentes = df[df["STATUS"].map(status_ausente)]
         origem_trechos = ausentes if not ausentes.empty else df
@@ -128,7 +196,7 @@ def gerar_pdf(result, origem):
     styles.add(ParagraphStyle(name="Celula", fontName="Helvetica", fontSize=9, leading=12, wordWrap="CJK"))
     styles.add(ParagraphStyle(name="Cabecalho", parent=styles["Celula"], fontName="Helvetica-Bold", textColor=colors.white))
     def p(value, style="Celula"):
-        return Paragraph(escape(texto(value)), styles[style])
+        return Paragraph(escape(texto(value)).replace("\n", "<br/>"), styles[style])
     trechos = result.attrs.get("trechos", [])
     story = [Paragraph("Relatório de Revisitas", styles["Title"])]
     if trechos:
@@ -137,10 +205,10 @@ def gerar_pdf(result, origem):
     if result.empty:
         story.append(p("Nenhum registro com status Ausente encontrado."))
     else:
-        rows = [[p(x, "Cabecalho") for x in ["Endereço", "Última visita", "Próxima visita sugerida"]]]
+        rows = [[p(x, "Cabecalho") for x in ["Endereço", "Histórico", "Próxima visita sugerida"]]]
         for _, row in result.iterrows():
-            rows.append([p(row["Endereço"]), p(row["Última visita"]), p(row["Recomendação"])])
-        table = LongTable(rows, colWidths=[8.5*cm, 2.8*cm, 6.7*cm], repeatRows=1, hAlign="LEFT")
+            rows.append([p(row["Endereço"]), p(row["Histórico"]), p(row["Recomendação"])])
+        table = LongTable(rows, colWidths=[7*cm, 5*cm, 6*cm], repeatRows=1, hAlign="LEFT")
         table.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#146078")), ("VALIGN", (0,0), (-1,-1), "TOP"), ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f0f5f7")]), ("TOPPADDING", (0,0), (-1,-1), 9), ("BOTTOMPADDING", (0,0), (-1,-1), 9)]))
         story.append(table)
     def footer(canvas, document):

@@ -3,7 +3,7 @@ from core import ler_excel, preparar, gerar_pdf
 
 st.set_page_config(page_title="Revisitas de campo", page_icon="📋")
 st.title("Revisitas de campo")
-st.write("Envie o Excel e baixe o PDF dos ausentes com o próximo turno sugerido.")
+st.write("Envie o Excel e baixe o PDF dos ausentes com o histórico e a próxima visita sugerida.")
 upload = st.file_uploader("Planilha de visitas", type=["xlsx", "xlsm"])
 if upload is not None:
     try:
